@@ -54,8 +54,10 @@ def run_agent(
     model: str | None = None,
 ) -> dict:
     note = (
-        f"Gambar terakhir yang diunggah user pada sesi ini: '{last_image}'. "
-        "Gunakan nilai itu sebagai image_path bila user bertanya tentang gambar."
+        f"User BARU SAJA mengunggah gambar '{last_image}' pada sesi ini. "
+        "Bila pertanyaan user bisa dijawab dari isi gambar itu - termasuk "
+        "pertanyaan singkat atau ambigu seperti 'berapa totalnya?' - panggil "
+        "image_ocr dengan image_path tersebut lebih dulu, jangan balik bertanya."
         if last_image
         else "Belum ada gambar yang diunggah pada sesi ini."
     )
