@@ -78,3 +78,24 @@ def test_accepts_valid_png_and_renames():
 def test_accepts_valid_pdf():
     kind, stored = uploads.validate("policy.pdf", b"%PDF-1.7\n%...", "application/pdf", 25)
     assert (kind, stored.endswith(".pdf")) == ("document", True)
+
+
+# --- Dynamic model selection ---
+
+def test_llm_cached_per_model():
+    """Switching models must not hand back the previous model's client."""
+    from services.llm_service import get_llm
+
+    a, b = get_llm("qwen2.5:7b"), get_llm("llama3.2:1b")
+    assert a is not b
+    assert a is get_llm("qwen2.5:7b")  # same name reuses the cached client
+    assert (a.model, b.model) == ("qwen2.5:7b", "llama3.2:1b")
+
+
+def test_executor_cached_per_model():
+    from agent import _executors, get_executor
+
+    _executors.clear()
+    x = get_executor("qwen2.5:7b")
+    assert get_executor("qwen2.5:7b") is x
+    assert get_executor("llama3.2:1b") is not x

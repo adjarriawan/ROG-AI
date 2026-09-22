@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
@@ -8,10 +9,21 @@ from sqlalchemy.orm import Session
 import uploads
 from agent import run_agent
 from config import get_settings
-from database import get_db
+from database import SessionLocal, get_db
 from models import ChatHistory, Document
-from schemas import ChatMessage, ChatRequest, ChatResponse, Source, UploadResponse
+from schemas import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    DocumentInfo,
+    ModelList,
+    ServiceHealth,
+    SessionInfo,
+    Source,
+    UploadResponse,
+)
 from services.document_service import ingest
+from services.llm_service import list_models
 
 log = logging.getLogger("agentic_rag")
 settings = get_settings()
@@ -31,13 +43,60 @@ _last_image: dict[str, str] = {}
 HISTORY_TURNS = 10
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+@app.get("/health", response_model=ServiceHealth)
+async def health():
+    """Per-dependency health, so a failure points at the culprit.
+
+    Fully async on purpose: a CPU-bound tool call (OCR) saturates the sync
+    threadpool that `def` endpoints share, and health must stay answerable
+    exactly when the system is struggling.
+    """
+    import httpx
+
+    def probe_db():
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+            return db.execute(
+                text("SELECT count(DISTINCT filename) FROM documents")
+            ).scalar_one()
+
+    try:
+        docs = await asyncio.wait_for(asyncio.to_thread(probe_db), timeout=5)
+        database = "ok"
+    except Exception as exc:
+        log.warning("db health failed: %s", exc)
+        database, docs = "error", 0
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            (await client.get(f"{settings.ollama_base_url}/api/tags")).raise_for_status()
+        ollama = "ok"
+    except Exception as exc:
+        log.warning("ollama health failed: %s", exc)
+        ollama = "error"
+
+    return ServiceHealth(
+        status="ok" if database == "ok" and ollama == "ok" else "degraded",
+        database=database,
+        ollama=ollama,
+        llm_model=settings.ollama_llm_model,
+        embedding_model=settings.ollama_embedding_model,
+        documents=docs,
+    )
+
+
+@app.get("/models", response_model=ModelList)
+def models():
+    """Chat models installed in Ollama. Only supports_tools=true can run the agent."""
+    try:
+        return ModelList(models=list_models(), current=settings.ollama_llm_model)
+    except Exception as exc:
+        log.exception("model list failed")
+        raise HTTPException(502, f"Gagal membaca daftar model dari Ollama: {exc}") from exc
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, db: Session = Depends(get_db)):
+async def chat(req: ChatRequest, db: Session = Depends(get_db)):
     recent = (
         db.execute(
             select(ChatHistory)
@@ -54,7 +113,11 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     db.commit()
 
     try:
-        result = run_agent(req.message, history, _last_image.get(req.session_id))
+        # The agent is blocking (LLM call + possibly a CPU-bound OCR tool).
+        # Off-loading it keeps the event loop free to serve /health and others.
+        result = await asyncio.to_thread(
+            run_agent, req.message, history, _last_image.get(req.session_id), req.model
+        )
     except Exception as exc:
         log.exception("agent failed")
         raise HTTPException(502, f"Agent gagal memproses permintaan: {exc}") from exc
@@ -66,6 +129,7 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
         answer=result["answer"],
         tool_used=result["tool_used"],
         sources=[Source(filename=f) for f in result["sources"]],
+        model=req.model or settings.ollama_llm_model,
     )
 
 
@@ -127,7 +191,7 @@ def chat_history(
     return list(reversed(rows))
 
 
-@app.get("/documents")
+@app.get("/documents", response_model=list[DocumentInfo])
 def documents(db: Session = Depends(get_db)):
     rows = db.execute(
         text(
@@ -135,4 +199,46 @@ def documents(db: Session = Depends(get_db)):
             "FROM documents GROUP BY filename ORDER BY uploaded_at DESC"
         )
     ).mappings().all()
-    return [dict(r) for r in rows]
+    return [DocumentInfo(**r) for r in rows]
+
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str, db: Session = Depends(get_db)):
+    deleted = db.execute(
+        text("DELETE FROM documents WHERE filename = :f"), {"f": filename}
+    ).rowcount
+    db.commit()
+    if not deleted:
+        raise HTTPException(404, f"Dokumen '{filename}' tidak ada di knowledge base.")
+    return {"filename": filename, "deleted_chunks": deleted}
+
+
+@app.get("/sessions", response_model=list[SessionInfo])
+def sessions(db: Session = Depends(get_db)):
+    """Chat sessions with their latest message, for the history sidebar."""
+    rows = db.execute(
+        text(
+            """
+            SELECT DISTINCT ON (session_id)
+                   session_id,
+                   count(*) OVER (PARTITION BY session_id) AS messages,
+                   message AS last_message,
+                   created_at AS updated_at
+            FROM chat_history
+            ORDER BY session_id, created_at DESC
+            """
+        )
+    ).mappings().all()
+    return sorted(
+        (SessionInfo(**r) for r in rows), key=lambda s: s.updated_at, reverse=True
+    )
+
+
+@app.delete("/chat/history")
+def clear_history(session_id: str = Query(..., max_length=100), db: Session = Depends(get_db)):
+    deleted = db.execute(
+        text("DELETE FROM chat_history WHERE session_id = :s"), {"s": session_id}
+    ).rowcount
+    db.commit()
+    _last_image.pop(session_id, None)
+    return {"session_id": session_id, "deleted": deleted}

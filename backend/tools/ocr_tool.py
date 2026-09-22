@@ -1,22 +1,51 @@
-"""Image_OCR — PaddleOCR over an uploaded image."""
+"""Image_OCR — RapidOCR (PaddleOCR's models on the ONNX runtime) over an image.
 
+PaddleOCR itself was the README's choice, but paddlepaddle 2.6.2 hangs
+indefinitely inside inference on macOS arm64 — reproduced on a blank 64x192
+image, so it is not image size, threads, or model downloads. RapidOCR ships the
+same PP-OCR models with a native arm64 ONNX runtime: same output, 0.5s.
+"""
+
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 from config import get_settings
 
+# OCR inference does not release the GIL, so running it in a thread freezes the
+# entire ASGI worker (even /health stops answering). It gets its own *process*;
+# "spawn" because forking a live uvicorn is unsafe on macOS.
+_pool: ProcessPoolExecutor | None = None
+OCR_TIMEOUT_SECONDS = 180
+
 _ocr = None
 
 
+def _get_pool() -> ProcessPoolExecutor:
+    global _pool
+    if _pool is None:
+        _pool = ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn")
+        )
+    return _pool
+
+
 def _engine():
-    """Lazy singleton: first init downloads models and takes ~30s."""
+    """Lazy singleton inside the worker process."""
     global _ocr
     if _ocr is None:
-        from paddleocr import PaddleOCR
+        from rapidocr_onnxruntime import RapidOCR
 
-        _ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+        _ocr = RapidOCR()
     return _ocr
+
+
+def _ocr_blocking(path_str: str) -> str:
+    """Runs in the worker process — must be module-level to be picklable."""
+    result, _elapsed = _engine()(path_str)
+    return "\n".join(box[1] for box in (result or []))
 
 
 def _safe_path(image_path: str) -> Path:
@@ -30,15 +59,22 @@ def _safe_path(image_path: str) -> Path:
 
 
 def run_ocr(image_path: str) -> str:
+    """Run OCR in a separate process, with a hard deadline."""
+    global _pool
     path = _safe_path(image_path)
-    result = _engine().ocr(str(path), cls=True)
-    lines = [
-        line[1][0]
-        for page in (result or [])
-        if page
-        for line in page
-    ]
-    return "\n".join(lines)
+    future = _get_pool().submit(_ocr_blocking, str(path))
+    try:
+        return future.result(timeout=OCR_TIMEOUT_SECONDS)
+    except FuturesTimeout:
+        # Kill the process outright: the C++ call cannot be interrupted, and a
+        # lingering worker would keep a core pinned for the next request too.
+        _pool.shutdown(wait=False, cancel_futures=True)
+        for proc in _pool._processes.values():
+            proc.kill()
+        _pool = None
+        raise TimeoutError(
+            f"OCR melebihi {OCR_TIMEOUT_SECONDS} detik pada mesin ini."
+        ) from None
 
 
 @tool
@@ -49,6 +85,8 @@ def image_ocr(image_path: str) -> str:
         text_out = run_ocr(image_path)
     except FileNotFoundError:
         return f"Gambar '{image_path}' tidak ditemukan."
+    except TimeoutError as exc:
+        return f"OCR gagal: {exc}"
     except Exception as exc:  # OCR engine failures must not kill the request
         return f"OCR gagal: {exc}"
 

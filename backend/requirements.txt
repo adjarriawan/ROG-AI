@@ -15,7 +15,6 @@ python-magic==0.4.27
 pytest==8.3.4
 setuptools>=75.0.0  # paddle imports it at runtime
 
-# Heavy OCR group. Requires Python 3.12 (no 3.13 wheels yet).
-# On failure see README-DEV.md for the RapidOCR fallback.
-paddlepaddle==2.6.2
-paddleocr==2.9.1
+# OCR. RapidOCR = PP-OCR models on ONNX runtime; paddlepaddle hangs on macOS arm64.
+rapidocr-onnxruntime==1.4.4
+httpx==0.28.1

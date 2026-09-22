@@ -19,14 +19,14 @@ _prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-_executor: AgentExecutor | None = None
+_executors: dict[str | None, AgentExecutor] = {}
 
 
-def get_executor() -> AgentExecutor:
-    global _executor
-    if _executor is None:
-        agent = create_tool_calling_agent(get_llm(), TOOLS, _prompt)
-        _executor = AgentExecutor(
+def get_executor(model: str | None = None) -> AgentExecutor:
+    """One executor per model, built on first use and reused after."""
+    if model not in _executors:
+        agent = create_tool_calling_agent(get_llm(model), TOOLS, _prompt)
+        _executors[model] = AgentExecutor(
             agent=agent,
             tools=TOOLS,
             return_intermediate_steps=True,
@@ -34,7 +34,7 @@ def get_executor() -> AgentExecutor:
             max_execution_time=240,  # a model that loops on bad tool args must not hang the request
             handle_parsing_errors=True,
         )
-    return _executor
+    return _executors[model]
 
 
 def to_messages(history: list) -> list:
@@ -47,7 +47,12 @@ def to_messages(history: list) -> list:
     return out
 
 
-def run_agent(message: str, history: list, last_image: str | None = None) -> dict:
+def run_agent(
+    message: str,
+    history: list,
+    last_image: str | None = None,
+    model: str | None = None,
+) -> dict:
     note = (
         f"Gambar terakhir yang diunggah user pada sesi ini: '{last_image}'. "
         "Gunakan nilai itu sebagai image_path bila user bertanya tentang gambar."
@@ -55,7 +60,7 @@ def run_agent(message: str, history: list, last_image: str | None = None) -> dic
         else "Belum ada gambar yang diunggah pada sesi ini."
     )
     rag_tool.last_sources.clear()
-    result = get_executor().invoke(
+    result = get_executor(model).invoke(
         {"input": message, "chat_history": to_messages(history), "context_note": note}
     )
 

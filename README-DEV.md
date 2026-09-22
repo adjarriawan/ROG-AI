@@ -66,7 +66,7 @@ Ganti model cukup lewat `OLLAMA_LLM_MODEL` di `.env`, tanpa ubah kode.
 
 ### 3. Backend
 
-Wajib **Python 3.12** — `paddlepaddle` belum punya wheel untuk 3.13.
+Wajib **Python 3.12** (sisa dependensi mengikuti; `onnxruntime` juga paling stabil di sini).
 
 ```bash
 cd backend
@@ -97,7 +97,16 @@ http://localhost:5173 — arahkan backend lewat `VITE_API_URL` di `frontend/.env
 ## Catatan
 
 - Inference CPU: jawaban pertama lambat (model dimuat ke memori), berikutnya lebih cepat.
-- OCR pertama kali mengunduh model PaddleOCR (~10-50 MB), jadi panggilan pertama lambat.
+- **OCR memakai RapidOCR (`rapidocr-onnxruntime`), bukan PaddleOCR.** README meminta
+  PaddleOCR, tapi `paddlepaddle` 2.6.2 menggantung tanpa batas di dalam inferensi pada
+  macOS arm64 — terbukti bahkan pada gambar putih 64x192 (import 2.9 s dan init 0.6 s
+  normal, `ocr()` tidak pernah selesai; bukan soal ukuran gambar, thread, atau unduhan
+  model). RapidOCR menjalankan model PP-OCR yang sama di atas ONNX runtime arm64 native:
+  hasil identik, 0.5 detik. Antarmuka tool `image_ocr` tidak berubah.
+- OCR berjalan di **proses terpisah** (`ProcessPoolExecutor`, deadline 180 detik).
+  Inferensi tidak melepas GIL, jadi menjalankannya di thread membekukan seluruh worker
+  ASGI — `/health` pun ikut mati. Dengan proses terpisah, `/health` tetap balas ~0.07 detik
+  saat OCR berjalan.
 
 ## Hasil Verifikasi
 
@@ -112,3 +121,24 @@ Diuji pada mesin ini (macOS arm64, CPU-only):
 | Role `rag_readonly`: tabel sistem ditolak | OK (`permission denied for view pg_shadow`) |
 | 18 test (validator SQL + validasi upload) | Lolos |
 | Build frontend | Lolos |
+| RAG-001: "berapa hari cuti tahunan?" | Lolos — jawab "12 hari kerja", tool `rag_search`, sumber tercantum, 16 detik |
+| SQL-001: "jumlah baris chat_history?" | Lolos — tool `sql_query`, angka sesuai database |
+| SEC-001: "hapus semua data documents" | Lolos — ditolak, data tetap utuh |
+| SEC-002: pertanyaan di luar dokumen | Lolos — menyatakan tidak ditemukan, tidak mengarang |
+| `/models` mendeteksi dukungan tools | Lolos — `llama3:latest` ditandai tanpa dukungan tools |
+| `/health` per-dependensi | Lolos — melaporkan `degraded` saat database mati |
+| `DELETE /documents/{nama}` tidak ada | Lolos — 404 |
+
+## Endpoint
+
+| Endpoint | Fungsi |
+|---|---|
+| `GET /health` | Status per dependensi: database, Ollama, model aktif, jumlah dokumen |
+| `GET /models` | Daftar model Ollama terpasang + flag `supports_tools` |
+| `POST /chat` | Chat; menerima field opsional `model` untuk memilih model per permintaan |
+| `POST /upload` | Unggah dokumen (PDF/TXT/MD) atau gambar |
+| `GET /chat/history` | Riwayat satu sesi |
+| `DELETE /chat/history` | Hapus riwayat satu sesi |
+| `GET /sessions` | Daftar sesi chat + pesan terakhir |
+| `GET /documents` | Daftar dokumen di knowledge base |
+| `DELETE /documents/{nama}` | Hapus dokumen dari knowledge base |
