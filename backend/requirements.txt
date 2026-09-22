@@ -1,0 +1,21 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-multipart==0.0.20
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+pgvector==0.3.6
+langchain==0.3.13
+langchain-core==0.3.28
+langchain-ollama==0.2.2
+langchain-community==0.3.13
+pypdf==5.1.0
+python-magic==0.4.27
+pytest==8.3.4
+setuptools>=75.0.0  # paddle imports it at runtime
+
+# Heavy OCR group. Requires Python 3.12 (no 3.13 wheels yet).
+# On failure see README-DEV.md for the RapidOCR fallback.
+paddlepaddle==2.6.2
+paddleocr==2.9.1
