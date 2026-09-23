@@ -12,7 +12,10 @@ import uploads
 from agent import run_agent
 from config import get_settings
 from database import SessionLocal, get_db
-from models import ChatHistory, Document
+from errors import safe_detail
+from models import ChatHistory
+from observability.context import request_id_var
+from observability.logging_setup import setup_logging
 from schemas import (
     ChatMessage,
     ChatRequest,
@@ -24,9 +27,6 @@ from schemas import (
     Source,
     UploadResponse,
 )
-from errors import safe_detail
-from observability.context import request_id_var
-from observability.logging_setup import setup_logging
 from services.document_service import ingest
 from services.llm_service import list_models
 

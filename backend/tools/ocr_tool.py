@@ -7,7 +7,8 @@ same PP-OCR models with a native arm64 ONNX runtime: same output, 0.5s.
 """
 
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 
 from langchain_core.tools import tool

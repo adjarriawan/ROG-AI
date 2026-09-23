@@ -61,7 +61,7 @@ def ingest(db: Session, path: Path, original_name: str) -> int:
                 "stored_as": path.name,
             },
         )
-        for i, ((chunk, page), vector) in enumerate(zip(pieces, vectors))
+        for i, ((chunk, page), vector) in enumerate(zip(pieces, vectors, strict=True))
     )
     db.commit()
     return len(chunks)

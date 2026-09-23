@@ -10,8 +10,8 @@ from langchain_core.tools import tool
 from sqlalchemy import text
 
 from config import get_settings
-from errors import tool_error
 from database import readonly_engine
+from errors import tool_error
 
 # chat_history is deliberately NOT here: it holds every user's messages, and
 # with no auth any caller could steer the agent into reading another session.

@@ -1,0 +1,15 @@
+# Lint config lives here, not in the venv, so `ruff check` gives the same
+# result for everyone. Default rules plus the ones that catch real bugs in
+# this codebase: unsorted imports, bugbear, and ruff's own checks.
+target-version = "py312"
+extend-exclude = [".venv"]
+
+[lint]
+extend-select = ["I", "B", "RUF"]
+ignore = [
+    # Depends()/File() in argument defaults is how FastAPI declares dependencies.
+    "B008",
+    # Tool and health-probe boundaries deliberately catch everything: a failing
+    # dependency must degrade the response, not kill the request.
+    "BLE001",
+]

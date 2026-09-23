@@ -189,3 +189,23 @@ RapidOCR sudah jadi engine, dan signature file dicek manual di `uploads.py`.
 bawah `contextvars.copy_context()`, jadi binding baru mendarat di salinan.
 `rag_tool` karena itu memutasi list-nya di tempat, bukan me-`set()` ulang.
 Ada test yang mengunci perilaku ini (`test_sources_survive_a_copied_context`).
+
+### Lint
+
+```bash
+backend/.venv/bin/pip install -r backend/requirements-dev.txt
+cd backend && .venv/bin/ruff check .
+```
+
+Konfigurasi ada di `backend/ruff.toml` (bukan di venv) supaya hasilnya sama di
+semua mesin: aturan default + `I` (urutan import), `B` (bugbear), `RUF`. Dua
+aturan dimatikan dengan alasan: `B008` karena `Depends()`/`File()` di default
+argumen memang cara FastAPI mendeklarasikan dependency, dan `BLE001` karena
+batas tool serta health probe sengaja menangkap semua exception - dependency
+yang gagal harus menurunkan kualitas jawaban, bukan mematikan request.
+
+Satu temuan nyata dari lint pertama: `ContextVar("rag_sources", default=[])`
+(B039). Default mutable itu satu objek yang dipakai bersama oleh setiap context
+yang belum memanggil `reset_sources()` - persis kebocoran antar-request yang
+seharusnya dicegah ContextVar. Sekarang `default=None` dengan list dibuat saat
+pertama dipakai.

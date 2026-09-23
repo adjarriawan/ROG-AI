@@ -7,8 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import uploads  # noqa: E402
-from tools.sql_tool import UnsafeQuery, validate  # noqa: E402
+import uploads
+from tools.sql_tool import UnsafeQuery, validate
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 

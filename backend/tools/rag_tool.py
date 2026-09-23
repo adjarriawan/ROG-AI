@@ -38,7 +38,19 @@ class Citation(TypedDict):
 # tool: LangChain invokes sync tools under a copied context, so a .set() there
 # would land in the copy and be lost when the tool returns. The list object
 # itself is shared between the copy and the caller.
-_sources: ContextVar[list[Citation]] = ContextVar("rag_sources", default=[])
+# default=None rather than []: a mutable default is one object shared by every
+# context that never called reset_sources(), which is exactly the cross-request
+# leak the ContextVar is here to prevent.
+_sources: ContextVar[list[Citation] | None] = ContextVar("rag_sources", default=None)
+
+
+def _sink() -> list[Citation]:
+    """The citation list of this context, created on first use."""
+    current = _sources.get()
+    if current is None:
+        current = []
+        _sources.set(current)
+    return current
 
 
 def reset_sources() -> None:
@@ -47,7 +59,7 @@ def reset_sources() -> None:
 
 
 def get_sources() -> list[Citation]:
-    return list(_sources.get())
+    return list(_sources.get() or [])
 
 
 @tool
@@ -70,7 +82,7 @@ def rag_search(query: str) -> str:
             {"q": str(vector), "k": s.rag_top_k},
         ).all()
 
-    sink = _sources.get()
+    sink = _sink()
     sink.clear()
 
     hits = [r for r in rows if r.distance <= s.rag_max_distance]
