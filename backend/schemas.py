@@ -11,6 +11,8 @@ class ChatRequest(BaseModel):
 
 class Source(BaseModel):
     filename: str
+    page: int | None = None
+    chunk_index: int | None = None
 
 
 class ChatResponse(BaseModel):
@@ -18,6 +20,8 @@ class ChatResponse(BaseModel):
     tool_used: str | None = None
     sources: list[Source] = []
     model: str | None = None
+    tools_used: list[str] = []
+    duration_ms: int | None = None
 
 
 class UploadResponse(BaseModel):

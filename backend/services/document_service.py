@@ -25,16 +25,29 @@ def clean(text: str) -> str:
     return " ".join(text.split())
 
 
-def chunk_file(path: Path) -> list[str]:
-    pages = [clean(t) for t in load_text(path)]
-    joined = "\n\n".join(p for p in pages if p)
-    return [c for c in splitter.split_text(joined) if c.strip()]
+def chunk_file(path: Path) -> list[tuple[str, int | None]]:
+    """Chunk per page, so each chunk keeps the page it came from.
 
+    Pages used to be joined before splitting, which produced slightly better
+    chunks across page breaks but threw away provenance - a citation could
+    then only name the file. Page-accurate citations are worth more than the
+    few chunks that straddle a boundary.
+    """
+    out: list[tuple[str, int | None]] = []
+    for number, raw in enumerate(load_text(path), start=1):
+        page = clean(raw)
+        if not page:
+            continue
+        # TXT/MD arrive as a single "page"; numbering it 1 would be a lie.
+        label = number if path.suffix.lower() == ".pdf" else None
+        out.extend((c, label) for c in splitter.split_text(page) if c.strip())
+    return out
 
 def ingest(db: Session, path: Path, original_name: str) -> int:
-    chunks = chunk_file(path)
-    if not chunks:
+    pieces = chunk_file(path)
+    if not pieces:
         return 0
+    chunks = [c for c, _ in pieces]
     vectors = embed_documents(chunks)
     db.add_all(
         Document(
@@ -44,10 +57,11 @@ def ingest(db: Session, path: Path, original_name: str) -> int:
             doc_metadata={
                 "filename": original_name,
                 "chunk_index": i,
+                "page": page,
                 "stored_as": path.name,
             },
         )
-        for i, (chunk, vector) in enumerate(zip(chunks, vectors))
+        for i, ((chunk, page), vector) in enumerate(zip(pieces, vectors))
     )
     db.commit()
     return len(chunks)

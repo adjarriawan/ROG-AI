@@ -5,11 +5,15 @@ services:
     environment:
       POSTGRES_DB: agentic_rag
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: mysecretpassword
+      # Credentials come from .env (gitignored); no literal secret in this file.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      RAG_READONLY_PASSWORD: ${RAG_READONLY_PASSWORD:?set RAG_READONLY_PASSWORD in .env}
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # 01-init.sh runs first and feeds init.sql the read-only password from env.
+      - ./backend/sql/01-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
       - ./backend/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d agentic_rag"]

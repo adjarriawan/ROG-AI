@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     rag_max_distance: float = 0.6
     rag_top_k: int = 4
     sql_timeout_ms: int = 5000
+    sql_max_rows: int = 50
+
+    ocr_timeout_seconds: int = 180
+    agent_max_iterations: int = 4
+    agent_timeout_seconds: int = 240
+
+    log_level: str = "INFO"
 
     @property
     def cors_origin_list(self) -> list[str]:

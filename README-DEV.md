@@ -142,3 +142,50 @@ Diuji pada mesin ini (macOS arm64, CPU-only):
 | `GET /sessions` | Daftar sesi chat + pesan terakhir |
 | `GET /documents` | Daftar dokumen di knowledge base |
 | `DELETE /documents/{nama}` | Hapus dokumen dari knowledge base |
+
+## Hardening pass (Fase 1-3)
+
+**Kredensial keluar dari repo.** `init.sql` tidak lagi memuat password. Password
+role read-only masuk lewat `backend/sql/01-init.sh` (dijalankan lebih dulu
+karena urut abjad) sebagai variabel psql, dibaca dari environment. `POSTGRES_PASSWORD`
+dan `RAG_READONLY_PASSWORD` wajib ada di `.env`; `docker-compose.yml` gagal cepat
+kalau kosong.
+
+**`chat_history` tidak lagi bisa dibaca agent.** Tanpa auth, siapa pun bisa
+menyuruh agent membaca sesi orang lain. Yang di-grant sekarang view agregat
+`chat_stats` (session_id, role, day, message_count, first_at, last_at) - cukup
+untuk "berapa chat hari ini", tanpa isi pesan. Batas ini ada di dua lapis:
+GRANT di database, dan allowlist di `sql_tool.py`.
+
+**Pesan error disanitasi.** `backend/errors.py`: detail exception masuk ke log
+JSON (dengan request id), yang kembali ke client hanya kalimat umum + `ref:`.
+Error driver bisa membawa connection string dan isi baris; untuk `tool_error`
+teks itu juga akan masuk konteks LLM, jadi tidak boleh bocor ke sana.
+
+**Batas ukuran upload dicek sebelum `file.read()`.** Membaca dulu baru memvalidasi
+berarti body 1 GB sudah terlanjur di memori.
+
+**Observability.** `backend/observability/`: middleware memberi tiap request satu
+id (`x-request-id`, dihormati kalau klien mengirimnya), formatter JSON meredaksi
+field bernama password/secret/token/api_key/authorization/credential, dan
+exception dicatat sebagai `error_type` + 500 karakter pertama - bukan traceback
+penuh, yang bisa memuat connection string.
+
+**Citation berhalaman.** Chunking sekarang per halaman, bukan seluruh PDF
+digabung dulu, sehingga `metadata.page` terisi dan `/chat` mengembalikan
+`{filename, page, chunk_index}`. Chunk lama (55 baris dari 2 PDF) sudah
+di-reindex. TXT/MD tetap `page: null` - menomori 1 akan menyesatkan.
+
+**Konfigurasi.** `sql_max_rows`, `ocr_timeout_seconds`, `agent_max_iterations`,
+`agent_timeout_seconds`, `log_level` pindah ke `config.py`/`.env`.
+
+**Dependency.** `paddleocr`/`paddlepaddle` (297 MB) dan `python-magic` dicopot -
+RapidOCR sudah jadi engine, dan signature file dicek manual di `uploads.py`.
+`langchain-text-splitters` didaftarkan karena diimpor langsung.
+
+### Jebakan yang ditemukan saat pengujian
+
+`ContextVar.set()` di dalam tool LangChain hilang: tool sinkron dijalankan di
+bawah `contextvars.copy_context()`, jadi binding baru mendarat di salinan.
+`rag_tool` karena itu memutasi list-nya di tempat, bukan me-`set()` ulang.
+Ada test yang mengunci perilaku ini (`test_sources_survive_a_copied_context`).

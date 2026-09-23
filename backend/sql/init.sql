@@ -23,14 +23,30 @@ CREATE INDEX IF NOT EXISTS idx_documents_embedding
 
 -- Read-only role for the SQL agent tool. This is the real SEC-001 boundary;
 -- the query validator in sql_tool.py is only the second layer.
+-- The password arrives as a psql variable from 01-init.sh, which reads it from
+-- the environment. Never write a credential into a file tracked by Git.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rag_readonly') THEN
-        CREATE ROLE rag_readonly LOGIN PASSWORD 'readonlypassword';
+        EXECUTE format('CREATE ROLE rag_readonly LOGIN PASSWORD %L', :'ro_password');
     END IF;
 END $$;
+
+-- Aggregated view instead of the raw table: the agent can still answer
+-- "how many chats today" without being able to read anyone's messages.
+CREATE OR REPLACE VIEW chat_stats AS
+SELECT session_id,
+       role,
+       date_trunc('day', created_at) AS day,
+       count(*)                      AS message_count,
+       min(created_at)               AS first_at,
+       max(created_at)               AS last_at
+FROM chat_history
+GROUP BY session_id, role, date_trunc('day', created_at);
 
 REVOKE ALL ON SCHEMA public FROM rag_readonly;
 GRANT CONNECT ON DATABASE agentic_rag TO rag_readonly;
 GRANT USAGE ON SCHEMA public TO rag_readonly;
-GRANT SELECT ON chat_history, documents TO rag_readonly;
+-- documents.content is the RAG corpus (already exposed via rag_search);
+-- chat_history is NOT granted - only its aggregate view.
+GRANT SELECT ON documents, chat_stats TO rag_readonly;

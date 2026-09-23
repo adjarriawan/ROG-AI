@@ -35,7 +35,7 @@ check_prereqs() {
   need ollama "Install dari https://ollama.com"
   need npm    "Install Node.js."
   docker info >/dev/null 2>&1 || die "Docker tidak berjalan. Jalankan Docker Desktop dulu."
-  [ -x "$PYTHON_BIN" ] || die "Python 3.12 tidak ada di $PYTHON_BIN (paddlepaddle belum punya wheel 3.13). Set PYTHON_BIN=/path/ke/python3.12"
+  [ -x "$PYTHON_BIN" ] || die "Python 3.12 tidak ada di $PYTHON_BIN. Set PYTHON_BIN=/path/ke/python3.12"
   [ -f .env ] || { cp .env.example .env; ok ".env dibuat dari .env.example"; }
 }
 
@@ -98,7 +98,7 @@ setup_venv() {
   # Reinstall hanya jika requirements.txt lebih baru dari penanda terakhir.
   local stamp="$VENV/.req-installed"
   if [ ! -f "$stamp" ] || [ backend/requirements.txt -nt "$stamp" ]; then
-    info "Menginstall dependensi backend (paddlepaddle butuh beberapa menit)..."
+    info "Menginstall dependensi backend (unduhan pertama beberapa menit)..."
     "$VENV/bin/pip" install -q --upgrade pip
     "$VENV/bin/pip" install -q -r backend/requirements.txt || die "Install dependensi gagal"
     touch "$stamp"

@@ -13,12 +13,13 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from config import get_settings
+from errors import tool_error
 
 # OCR inference does not release the GIL, so running it in a thread freezes the
 # entire ASGI worker (even /health stops answering). It gets its own *process*;
 # "spawn" because forking a live uvicorn is unsafe on macOS.
 _pool: ProcessPoolExecutor | None = None
-OCR_TIMEOUT_SECONDS = 180
+
 
 _ocr = None
 
@@ -61,10 +62,11 @@ def _safe_path(image_path: str) -> Path:
 def run_ocr(image_path: str) -> str:
     """Run OCR in a separate process, with a hard deadline."""
     global _pool
+    timeout = get_settings().ocr_timeout_seconds
     path = _safe_path(image_path)
     future = _get_pool().submit(_ocr_blocking, str(path))
     try:
-        return future.result(timeout=OCR_TIMEOUT_SECONDS)
+        return future.result(timeout=timeout)
     except FuturesTimeout:
         # Kill the process outright: the C++ call cannot be interrupted, and a
         # lingering worker would keep a core pinned for the next request too.
@@ -73,7 +75,7 @@ def run_ocr(image_path: str) -> str:
             proc.kill()
         _pool = None
         raise TimeoutError(
-            f"OCR melebihi {OCR_TIMEOUT_SECONDS} detik pada mesin ini."
+            f"OCR melebihi {timeout} detik pada mesin ini."
         ) from None
 
 
@@ -88,7 +90,8 @@ def image_ocr(image_path: str) -> str:
     except TimeoutError as exc:
         return f"OCR gagal: {exc}"
     except Exception as exc:  # OCR engine failures must not kill the request
-        return f"OCR gagal: {exc}"
+        # Engine errors name model paths and temp files; keep those in the log.
+        return tool_error("OCR gagal memproses gambar tersebut.", exc, "image_ocr")
 
     if not text_out.strip():
         return "Tidak ada teks yang terbaca pada gambar tersebut."

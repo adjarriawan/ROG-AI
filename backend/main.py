@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import time
+import uuid
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,11 +24,15 @@ from schemas import (
     Source,
     UploadResponse,
 )
+from errors import safe_detail
+from observability.context import request_id_var
+from observability.logging_setup import setup_logging
 from services.document_service import ingest
 from services.llm_service import list_models
 
-log = logging.getLogger("agentic_rag")
 settings = get_settings()
+setup_logging(settings.log_level)
+log = logging.getLogger("agentic_rag")
 
 app = FastAPI(title="Agentic RAG — Local AI System", version="1.0.0")
 app.add_middleware(
@@ -36,6 +42,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_context(request, call_next):
+    """Tag every log line of this request with one id.
+
+    The id also goes back in a header and into sanitized error messages, so a
+    user-reported failure can be found in the log without them ever seeing the
+    underlying exception.
+    """
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    token = request_id_var.set(rid)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        # Logged inside the block: resetting first would strip the id from
+        # this very line.
+        log.info(
+            "%s %s -> %d in %dms",
+            request.method,
+            request.url.path,
+            response.status_code,
+            int((time.perf_counter() - started) * 1000),
+        )
+    finally:
+        request_id_var.reset(token)
+    response.headers["x-request-id"] = rid
+    return response
 
 # Last image uploaded per session, so the agent knows what "this receipt" means.
 _last_image: dict[str, str] = {}
@@ -91,8 +125,9 @@ def models():
     try:
         return ModelList(models=list_models(), current=settings.ollama_llm_model)
     except Exception as exc:
-        log.exception("model list failed")
-        raise HTTPException(502, f"Gagal membaca daftar model dari Ollama: {exc}") from exc
+        raise HTTPException(
+            502, safe_detail("Gagal membaca daftar model dari Ollama.", exc, "models")
+        ) from exc
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -119,8 +154,9 @@ async def chat(req: ChatRequest, db: Session = Depends(get_db)):
             run_agent, req.message, history, _last_image.get(req.session_id), req.model
         )
     except Exception as exc:
-        log.exception("agent failed")
-        raise HTTPException(502, f"Agent gagal memproses permintaan: {exc}") from exc
+        raise HTTPException(
+            502, safe_detail("Agent gagal memproses permintaan.", exc, "chat")
+        ) from exc
 
     db.add(ChatHistory(session_id=req.session_id, role="assistant", message=result["answer"]))
     db.commit()
@@ -128,9 +164,23 @@ async def chat(req: ChatRequest, db: Session = Depends(get_db)):
     return ChatResponse(
         answer=result["answer"],
         tool_used=result["tool_used"],
-        sources=[Source(filename=f) for f in result["sources"]],
+        sources=[Source(**c) for c in _dedupe(result["sources"])],
         model=req.model or settings.ollama_llm_model,
+        tools_used=result["tools_used"],
+        duration_ms=result["duration_ms"],
     )
+
+
+def _dedupe(citations):
+    """One entry per (file, page) - the UI lists sources, not chunks."""
+    seen, out = set(), []
+    for c in citations:
+        key = (c["filename"], c.get("page"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({k: c[k] for k in ("filename", "page", "chunk_index") if k in c})
+    return out
 
 
 @app.post("/upload", response_model=UploadResponse)
@@ -139,7 +189,15 @@ async def upload(
     session_id: str = Query("default", max_length=100),
     db: Session = Depends(get_db),
 ):
+    # Check the declared size before reading: file.read() pulls the whole body
+    # into memory, so validating afterwards is too late to be a limit.
+    limit = settings.max_upload_mb * 1024 * 1024
+    declared = getattr(file, "size", None)
+    if declared is not None and declared > limit:
+        raise HTTPException(413, f"File melebihi {settings.max_upload_mb} MB.")
     content = await file.read()
+    if len(content) > limit:
+        raise HTTPException(413, f"File melebihi {settings.max_upload_mb} MB.")
     try:
         kind, stored_name = uploads.validate(
             file.filename or "", content, file.content_type, settings.max_upload_mb
@@ -159,9 +217,10 @@ async def upload(
     try:
         chunks = ingest(db, path, file.filename)
     except Exception as exc:
-        log.exception("ingest failed")
         path.unlink(missing_ok=True)
-        raise HTTPException(502, f"Gagal memproses dokumen: {exc}") from exc
+        raise HTTPException(
+            502, safe_detail("Gagal memproses dokumen.", exc, "upload")
+        ) from exc
 
     if chunks == 0:
         path.unlink(missing_ok=True)

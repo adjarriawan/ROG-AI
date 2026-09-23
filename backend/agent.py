@@ -1,12 +1,19 @@
+import logging
+import time
+from typing import TypedDict
+
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from config import get_settings
 from services.llm_service import SYSTEM_PROMPT, get_llm
 from tools import rag_tool
 from tools.ocr_tool import image_ocr
 from tools.rag_tool import rag_search
 from tools.sql_tool import sql_query
+
+log = logging.getLogger("agentic_rag.agent")
 
 TOOLS = [rag_search, image_ocr, sql_query]
 
@@ -25,16 +32,32 @@ _executors: dict[str | None, AgentExecutor] = {}
 def get_executor(model: str | None = None) -> AgentExecutor:
     """One executor per model, built on first use and reused after."""
     if model not in _executors:
+        s = get_settings()
         agent = create_tool_calling_agent(get_llm(model), TOOLS, _prompt)
         _executors[model] = AgentExecutor(
             agent=agent,
             tools=TOOLS,
             return_intermediate_steps=True,
-            max_iterations=4,
-            max_execution_time=240,  # a model that loops on bad tool args must not hang the request
+            max_iterations=s.agent_max_iterations,
+            # a model that loops on bad tool args must not hang the request
+            max_execution_time=s.agent_timeout_seconds,
             handle_parsing_errors=True,
         )
     return _executors[model]
+
+
+class ToolCall(TypedDict):
+    tool: str
+    duration_ms: int
+
+
+class AgentResult(TypedDict):
+    answer: str
+    tool_used: str | None
+    tools_used: list[str]
+    tool_calls: list[ToolCall]
+    sources: list[rag_tool.Citation]
+    duration_ms: int
 
 
 def to_messages(history: list) -> list:
@@ -52,7 +75,7 @@ def run_agent(
     history: list,
     last_image: str | None = None,
     model: str | None = None,
-) -> dict:
+) -> AgentResult:
     note = (
         f"User BARU SAJA mengunggah gambar '{last_image}' pada sesi ini. "
         "Bila pertanyaan user bisa dijawab dari isi gambar itu - termasuk "
@@ -61,14 +84,34 @@ def run_agent(
         if last_image
         else "Belum ada gambar yang diunggah pada sesi ini."
     )
-    rag_tool.last_sources.clear()
+    rag_tool.reset_sources()
+    started = time.perf_counter()
     result = get_executor(model).invoke(
         {"input": message, "chat_history": to_messages(history), "context_note": note}
     )
+    duration_ms = int((time.perf_counter() - started) * 1000)
 
-    tools_used = [action.tool for action, _ in result.get("intermediate_steps", [])]
-    return {
-        "answer": result["output"],
-        "tool_used": tools_used[-1] if tools_used else None,
-        "sources": list(rag_tool.last_sources),
-    }
+    steps = result.get("intermediate_steps", [])
+    tools_used = [action.tool for action, _ in steps]
+    # Per-call duration is not exposed by AgentExecutor; the total is, so record
+    # the tool sequence and the run total rather than inventing per-tool numbers.
+    calls: list[ToolCall] = [ToolCall(tool=t, duration_ms=-1) for t in tools_used]
+
+    log.info(
+        "agent run model=%s tools=%s duration_ms=%d sources=%d",
+        model or "default",
+        ",".join(tools_used) or "-",
+        duration_ms,
+        len(rag_tool.get_sources()),
+    )
+
+    return AgentResult(
+        answer=result["output"],
+        # tool_used keeps the README's single-value contract; tools_used is the
+        # complete sequence, which is what an audit trail actually needs.
+        tool_used=tools_used[-1] if tools_used else None,
+        tools_used=tools_used,
+        tool_calls=calls,
+        sources=rag_tool.get_sources(),
+        duration_ms=duration_ms,
+    )

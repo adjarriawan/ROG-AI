@@ -9,10 +9,15 @@ import re
 from langchain_core.tools import tool
 from sqlalchemy import text
 
+from config import get_settings
+from errors import tool_error
 from database import readonly_engine
 
-ALLOWED_TABLES = {"chat_history", "documents"}
-MAX_ROWS = 50
+# chat_history is deliberately NOT here: it holds every user's messages, and
+# with no auth any caller could steer the agent into reading another session.
+# chat_stats is its aggregate view - counts and timestamps, no message text.
+# The database grants match this exactly (backend/sql/init.sql).
+ALLOWED_TABLES = {"documents", "chat_stats"}
 
 _FORBIDDEN = re.compile(
     r"\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|"
@@ -24,8 +29,8 @@ _TABLE_REF = re.compile(r"\b(?:from|join)\s+([a-zA-Z_][\w.]*)", re.IGNORECASE)
 _CTE_NAME = re.compile(r"(?:\bwith\s+|,)\s*([a-zA-Z_]\w*)\s+as\s*\(", re.IGNORECASE)
 
 SCHEMA_HINT = """Tabel yang tersedia:
-- chat_history(id, session_id, role, message, created_at)
-- documents(id, filename, content, metadata, created_at)"""
+- documents(id, filename, content, metadata, created_at)
+- chat_stats(session_id, role, day, message_count, first_at, last_at)"""
 
 
 class UnsafeQuery(ValueError):
@@ -65,7 +70,7 @@ def run_query(sql: str) -> str:
     query = validate(sql)
     with readonly_engine.connect() as conn:
         result = conn.execute(text(query))
-        rows = result.fetchmany(MAX_ROWS)
+        rows = result.fetchmany(get_settings().sql_max_rows)
         cols = list(result.keys())
     if not rows:
         return "Query berhasil, tetapi tidak ada baris yang cocok."
@@ -78,14 +83,18 @@ def run_query(sql: str) -> str:
 def sql_query(query: str) -> str:
     """Jalankan SELECT read-only pada database untuk data terstruktur/statistik.
 
-    Tabel yang diizinkan hanya chat_history dan documents.
-    chat_history(id, session_id, role, message, created_at)
+    Tabel yang diizinkan hanya documents dan chat_stats.
     documents(id, filename, content, metadata, created_at)
-    Contoh: SELECT count(*) FROM chat_history WHERE created_at::date = CURRENT_DATE
+    chat_stats(session_id, role, day, message_count, first_at, last_at)
+    Contoh: SELECT sum(message_count) FROM chat_stats WHERE day = CURRENT_DATE
     """
     try:
         return run_query(query)
     except UnsafeQuery as exc:
         return f"Query ditolak: {exc}\n\n{SCHEMA_HINT}"
     except Exception as exc:
-        return f"Query gagal dijalankan: {exc}\n\n{SCHEMA_HINT}"
+        # UnsafeQuery text is ours and safe to show; a driver error is not -
+        # it can carry the connection string or row data into the LLM context.
+        return tool_error(
+            f"Query gagal dijalankan.\n\n{SCHEMA_HINT}", exc, "sql_query"
+        )

@@ -34,10 +34,18 @@ def test_unsafe_sql_rejected(sql):
         validate(sql)
 
 
+def test_chat_history_not_readable():
+    """Raw messages are off-limits even though the table exists: with no auth,
+    any caller could otherwise steer the agent into another session's chat.
+    chat_stats is the aggregate the agent is allowed to see instead."""
+    with pytest.raises(UnsafeQuery):
+        validate("SELECT message FROM chat_history")
+
+
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT count(*) FROM chat_history WHERE created_at::date = CURRENT_DATE",
+        "SELECT sum(message_count) FROM chat_stats WHERE day = CURRENT_DATE",
         "select filename from documents limit 5;",
         "WITH t AS (SELECT id FROM documents) SELECT count(*) FROM t JOIN documents ON true",
     ],
@@ -99,3 +107,43 @@ def test_executor_cached_per_model():
     x = get_executor("qwen2.5:7b")
     assert get_executor("qwen2.5:7b") is x
     assert get_executor("llama3.2:1b") is not x
+
+
+# --- Citation shaping ---
+
+def test_dedupe_collapses_chunks_of_same_page():
+    """Several chunks from one page must surface as a single source."""
+    from main import _dedupe
+
+    out = _dedupe(
+        [
+            {"filename": "a.pdf", "page": 2, "chunk_index": 5, "distance": 0.1},
+            {"filename": "a.pdf", "page": 2, "chunk_index": 6, "distance": 0.2},
+            {"filename": "a.pdf", "page": 3, "chunk_index": 9, "distance": 0.3},
+            {"filename": "b.txt", "page": None, "chunk_index": 0, "distance": 0.4},
+        ]
+    )
+    assert [(c["filename"], c["page"]) for c in out] == [
+        ("a.pdf", 2),
+        ("a.pdf", 3),
+        ("b.txt", None),
+    ]
+    assert "distance" not in out[0]
+
+
+def test_sources_survive_a_copied_context():
+    """LangChain runs sync tools under contextvars.copy_context(); a .set()
+    inside the tool would be discarded. Guards the in-place mutation."""
+    import contextvars
+
+    from tools import rag_tool
+
+    rag_tool.reset_sources()
+
+    def inside_tool():
+        rag_tool._sources.get().append(
+            rag_tool.Citation(filename="x.pdf", page=1, chunk_index=0, distance=0.1)
+        )
+
+    contextvars.copy_context().run(inside_tool)
+    assert [c["filename"] for c in rag_tool.get_sources()] == ["x.pdf"]
