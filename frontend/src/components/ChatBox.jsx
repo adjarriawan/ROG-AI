@@ -5,12 +5,16 @@ import ModelPicker from './ModelPicker'
 import Sidebar from './Sidebar'
 import UploadButton from './UploadButton'
 import {
+  addFact,
   deleteDocument,
+  deleteFact,
   fetchDocuments,
+  fetchKnowledge,
   fetchHealth,
   fetchHistory,
   fetchModels,
   fetchSessions,
+  reviewFact,
   sendChat,
   uploadFile,
 } from '../services/api'
@@ -40,6 +44,9 @@ export default function ChatBox() {
   const [model, setModel] = useState(localStorage.getItem('model') ?? '')
   const [sessions, setSessions] = useState([])
   const [documents, setDocuments] = useState([])
+  const [facts, setFacts] = useState([])
+  // Pending is what needs a human; show that first.
+  const [factFilter, setFactFilter] = useState('pending')
 
   const endRef = useRef(null)
 
@@ -47,10 +54,16 @@ export default function ChatBox() {
     fetchHealth().then(setHealth).catch(() => setHealth(null))
   }, [])
 
+  const refreshFacts = useCallback(() => {
+    fetchKnowledge(factFilter).then(setFacts).catch(() => {})
+  }, [factFilter])
+
   const refreshSidebar = useCallback(() => {
     fetchSessions().then(setSessions).catch(() => {})
     fetchDocuments().then(setDocuments).catch(() => {})
   }, [])
+
+  useEffect(refreshFacts, [refreshFacts])
 
   useEffect(() => {
     refreshHealth()
@@ -142,6 +155,35 @@ export default function ChatBox() {
     }
   }
 
+  async function handleReviewFact(id, decision) {
+    try {
+      await reviewFact(id, decision)
+      refreshFacts()
+    } catch (err) {
+      push({ role: 'error', message: err.message })
+    }
+  }
+
+  async function handleDeleteFact(id) {
+    if (!confirm('Hapus fakta ini secara permanen?')) return
+    try {
+      await deleteFact(id)
+      refreshFacts()
+    } catch (err) {
+      push({ role: 'error', message: err.message })
+    }
+  }
+
+  async function handleAddFact(content) {
+    try {
+      await addFact(content)
+      // A manually added fact is approved, so show the list it landed in.
+      setFactFilter('approved')
+    } catch (err) {
+      push({ role: 'error', message: err.message })
+    }
+  }
+
   async function handleDeleteDocument(filename) {
     if (!confirm(`Hapus "${filename}" dari knowledge base?`)) return
     try {
@@ -162,6 +204,12 @@ export default function ChatBox() {
         onSelectSession={selectSession}
         onNewSession={startNewSession}
         onDeleteDocument={handleDeleteDocument}
+        facts={facts}
+        factFilter={factFilter}
+        onFactFilter={setFactFilter}
+        onReviewFact={handleReviewFact}
+        onDeleteFact={handleDeleteFact}
+        onAddFact={handleAddFact}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">

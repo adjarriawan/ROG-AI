@@ -72,3 +72,43 @@ export async function fetchSessions() {
 export async function clearHistory(sessionId) {
   await client.delete('/chat/history', { params: { session_id: sessionId } })
 }
+
+export async function fetchKnowledge(status) {
+  const { data } = await client.get('/knowledge', {
+    params: status ? { status } : {},
+    timeout: 10000,
+  })
+  return data
+}
+
+export async function fetchKnowledgeCounts() {
+  const { data } = await client.get('/knowledge/counts', { timeout: 10000 })
+  return data
+}
+
+export async function addFact(content) {
+  try {
+    const { data } = await client.post('/knowledge', { content })
+    return data
+  } catch (err) {
+    throw new Error(errMessage(err))
+  }
+}
+
+export async function reviewFact(id, decision) {
+  try {
+    const { data } = await client.post(`/knowledge/${id}/${decision}`)
+    return data
+  } catch (err) {
+    throw new Error(errMessage(err))
+  }
+}
+
+export async function deleteFact(id) {
+  try {
+    const { data } = await client.delete(`/knowledge/${id}`)
+    return data
+  } catch (err) {
+    throw new Error(errMessage(err))
+  }
+}

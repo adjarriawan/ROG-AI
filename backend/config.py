@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # Cosine distance above this means "not relevant enough" (SEC-002).
     rag_max_distance: float = 0.6
     rag_top_k: int = 4
+    # Learned facts are short single statements, so a tighter distance than the
+    # document threshold: a loose match here would state an unrelated fact as
+    # verified knowledge.
+    knowledge_max_distance: float = 0.45
+    knowledge_top_k: int = 3
     sql_timeout_ms: int = 5000
     sql_max_rows: int = 50
 

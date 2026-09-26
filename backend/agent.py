@@ -8,14 +8,15 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from config import get_settings
 from services.llm_service import SYSTEM_PROMPT, get_llm
-from tools import rag_tool
+from tools import knowledge_tool, rag_tool
+from tools.knowledge_tool import knowledge_search, remember_fact
 from tools.ocr_tool import image_ocr
 from tools.rag_tool import rag_search
 from tools.sql_tool import sql_query
 
 log = logging.getLogger("agentic_rag.agent")
 
-TOOLS = [rag_search, image_ocr, sql_query]
+TOOLS = [rag_search, image_ocr, sql_query, knowledge_search, remember_fact]
 
 _prompt = ChatPromptTemplate.from_messages(
     [
@@ -75,6 +76,7 @@ def run_agent(
     history: list,
     last_image: str | None = None,
     model: str | None = None,
+    session_id: str | None = None,
 ) -> AgentResult:
     note = (
         f"User BARU SAJA mengunggah gambar '{last_image}' pada sesi ini. "
@@ -85,6 +87,8 @@ def run_agent(
         else "Belum ada gambar yang diunggah pada sesi ini."
     )
     rag_tool.reset_sources()
+    # Which session a proposed fact came from is ours to decide, not the model's.
+    knowledge_tool.set_session(session_id)
     started = time.perf_counter()
     result = get_executor(model).invoke(
         {"input": message, "chat_history": to_messages(history), "context_note": note}

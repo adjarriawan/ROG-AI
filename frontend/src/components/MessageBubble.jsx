@@ -4,6 +4,8 @@ const TOOL_LABEL = {
   rag_search: 'RAG',
   image_ocr: 'OCR',
   sql_query: 'SQL',
+  knowledge_search: 'Pengetahuan',
+  remember_fact: 'Usulan fakta',
 }
 
 export default function MessageBubble({ role, message, toolUsed, sources = [], model }) {
@@ -41,12 +43,14 @@ export default function MessageBubble({ role, message, toolUsed, sources = [], m
                 {model}
               </span>
             )}
+            {/* Key on file + page: two pages of one document are two sources. */}
             {sources.map((s) => (
               <span
-                key={s.filename}
+                key={`${s.filename}#${s.page ?? ''}`}
                 className="rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] text-emerald-700"
               >
                 Source: {s.filename}
+                {s.page ? `, hal. ${s.page}` : ''}
               </span>
             ))}
           </div>

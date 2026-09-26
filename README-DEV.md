@@ -209,3 +209,57 @@ Satu temuan nyata dari lint pertama: `ContextVar("rag_sources", default=[])`
 yang belum memanggil `reset_sources()` - persis kebocoran antar-request yang
 seharusnya dicegah ContextVar. Sekarang `default=None` dengan list dibuat saat
 pertama dipakai.
+
+## Knowledge base global (fakta lintas sesi)
+
+Sebelum ini satu-satunya pengetahuan sistem adalah chunk dokumen. Apa pun yang
+muncul dari percakapan hilang saat sesi berganti. Sekarang ada tabel
+`knowledge_facts`: fakta pendek yang berlaku di **semua** sesi.
+
+**Alur tulis dua langkah.** Agent hanya boleh membuat baris `pending` lewat tool
+`remember_fact`; hanya baris `approved` yang dicari `knowledge_search`. Aplikasi
+ini tanpa auth — kalau agent boleh menerbitkan langsung, satu prompt jahat di
+satu sesi mengubah apa yang dipercaya semua sesi lain, permanen.
+
+**Batas ini menahan agent, bukan manusia.** Tanpa auth, siapa pun yang bisa
+membuka UI juga bisa menekan Setujui. Pasang auth sebelum aplikasi ini keluar
+dari localhost.
+
+`knowledge_facts` sengaja tidak di-`GRANT` ke `rag_readonly` dan tidak masuk
+`ALLOWED_TABLES` di `sql_tool.py` — jalur SQL tidak boleh membaca usulan yang
+belum diperiksa.
+
+### Migrasi
+
+`init.sql` hanya jalan sekali saat volume Docker dibuat, jadi database yang
+sudah hidup butuh:
+
+```bash
+docker exec -i agentic-rag-ai-db psql -U postgres -d agentic_rag \
+  < backend/sql/migrations/002_knowledge_facts.sql
+```
+
+Idempoten; aman dijalankan berulang.
+
+### Prioritas sumber
+
+Dokumen menang atas fakta tersimpan bila keduanya membahas hal yang sama dan
+berbeda isi, dan pertentangannya disebutkan ke user — aturan ini ada di
+`SYSTEM_PROMPT` dan diulang di dalam pagar hasil `knowledge_search`.
+
+### Ekspor fine-tuning
+
+`GET /knowledge/export.jsonl` menghasilkan JSONL (fakta approved + pasangan
+percakapan yang tidak berakhir "tidak ditemukan"). Hanya ekspor; tidak ada
+pipeline training di repo ini. Fakta yang sudah masuk bobot model tidak bisa
+dicabut tanpa melatih ulang, sementara baris tabel bisa — ekspor menjaga opsi
+fine-tuning terbuka tanpa mengunci arsitektur ke sana.
+
+### Jebakan yang ditemukan saat pengujian
+
+Versi pertama memberi `knowledge_facts` index ivfflat seperti `documents`.
+Akibatnya fakta yang **sudah di-approve tidak pernah ditemukan**: ivfflat itu
+index aproksimatif, dan dengan satu probe atas 100 list, tabel berisi satu baris
+mengembalikan nol hasil. Index dihapus; pemindaian eksak sudah tepat untuk
+tabel sekecil ini. Ada test yang menjaga agar index itu tidak kembali
+(`test_fact_search_is_not_behind_an_approximate_index`).

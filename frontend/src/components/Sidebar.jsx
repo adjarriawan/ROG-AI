@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import KnowledgePanel from './KnowledgePanel'
 
 function Tab({ active, onClick, children }) {
   return (
@@ -21,6 +22,12 @@ export default function Sidebar({
   onSelectSession,
   onNewSession,
   onDeleteDocument,
+  facts,
+  factFilter,
+  onFactFilter,
+  onReviewFact,
+  onDeleteFact,
+  onAddFact,
 }) {
   const [tab, setTab] = useState('sessions')
 
@@ -43,6 +50,9 @@ export default function Sidebar({
           </Tab>
           <Tab active={tab === 'docs'} onClick={() => setTab('docs')}>
             Dokumen ({documents.length})
+          </Tab>
+          <Tab active={tab === 'knowledge'} onClick={() => setTab('knowledge')}>
+            Fakta ({facts.length})
           </Tab>
         </div>
       </div>
@@ -99,6 +109,17 @@ export default function Sidebar({
               </div>
             ))
           ))}
+
+        {tab === 'knowledge' && (
+          <KnowledgePanel
+            facts={facts}
+            filter={factFilter}
+            onFilter={onFactFilter}
+            onReview={onReviewFact}
+            onDelete={onDeleteFact}
+            onAdd={onAddFact}
+          />
+        )}
       </div>
     </aside>
   )

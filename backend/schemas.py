@@ -70,3 +70,25 @@ class SessionInfo(BaseModel):
     messages: int
     last_message: str
     updated_at: datetime
+
+
+class KnowledgeFactInfo(BaseModel):
+    id: int
+    content: str
+    status: str
+    origin: str
+    source_session_id: str | None = None
+    created_at: datetime
+    reviewed_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class KnowledgeFactCreate(BaseModel):
+    content: str = Field(min_length=10, max_length=2000)
+
+
+class KnowledgeCounts(BaseModel):
+    pending: int
+    approved: int
+    rejected: int

@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import time
 import uuid
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -21,12 +23,16 @@ from schemas import (
     ChatRequest,
     ChatResponse,
     DocumentInfo,
+    KnowledgeCounts,
+    KnowledgeFactCreate,
+    KnowledgeFactInfo,
     ModelList,
     ServiceHealth,
     SessionInfo,
     Source,
     UploadResponse,
 )
+from services import knowledge_service
 from services.document_service import ingest
 from services.llm_service import list_models
 
@@ -151,7 +157,12 @@ async def chat(req: ChatRequest, db: Session = Depends(get_db)):
         # The agent is blocking (LLM call + possibly a CPU-bound OCR tool).
         # Off-loading it keeps the event loop free to serve /health and others.
         result = await asyncio.to_thread(
-            run_agent, req.message, history, _last_image.get(req.session_id), req.model
+            run_agent,
+            req.message,
+            history,
+            _last_image.get(req.session_id),
+            req.model,
+            req.session_id,
         )
     except Exception as exc:
         raise HTTPException(
@@ -270,6 +281,148 @@ def delete_document(filename: str, db: Session = Depends(get_db)):
     if not deleted:
         raise HTTPException(404, f"Dokumen '{filename}' tidak ada di knowledge base.")
     return {"filename": filename, "deleted_chunks": deleted}
+
+
+# --- Knowledge base -------------------------------------------------------
+#
+# Global on purpose: a fact learned in one session is meant to be usable in
+# every other one. The agent may only propose; approving is a human action.
+# With no auth in front of this app that boundary holds back the agent, not a
+# hostile human - see README-DEV.md.
+
+
+@app.get("/knowledge", response_model=list[KnowledgeFactInfo])
+def knowledge_list(
+    status: str | None = Query(None, max_length=20),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    try:
+        return knowledge_service.listing(db, status, limit)
+    except knowledge_service.InvalidFact as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/knowledge/counts", response_model=KnowledgeCounts)
+def knowledge_counts(db: Session = Depends(get_db)):
+    """Counts per status, for the review-queue badge."""
+    rows = dict(
+        db.execute(
+            text("SELECT status, count(*) FROM knowledge_facts GROUP BY status")
+        ).all()
+    )
+    return KnowledgeCounts(
+        pending=rows.get("pending", 0),
+        approved=rows.get("approved", 0),
+        rejected=rows.get("rejected", 0),
+    )
+
+
+@app.get("/knowledge/export.jsonl")
+def knowledge_export(db: Session = Depends(get_db)):
+    """Training data for a later fine-tune, as JSONL.
+
+    Export only - there is no training pipeline here. A fact baked into weights
+    cannot be withdrawn without retraining, which is exactly why the knowledge
+    base above stores them as rows instead. This keeps the option open without
+    committing to it.
+    """
+
+    def lines():
+        for fact in db.execute(
+            select(knowledge_service.KnowledgeFact)
+            .where(knowledge_service.KnowledgeFact.status == "approved")
+            .order_by(knowledge_service.KnowledgeFact.id)
+        ).scalars():
+            yield json.dumps(
+                {
+                    "messages": [
+                        # ponytail: one fixed prompt for every fact. Good enough
+                        # to carry the facts into a fine-tune, but it teaches no
+                        # question variety. When the fact count justifies it,
+                        # store the question the fact answered at propose() time
+                        # and emit that instead.
+                        {
+                            "role": "user",
+                            "content": "Apa yang kamu ketahui tentang hal ini?",
+                        },
+                        {"role": "assistant", "content": fact.content},
+                    ],
+                    "source": "knowledge_fact",
+                },
+                ensure_ascii=False,
+            ) + "\n"
+
+        # Conversation pairs, skipping turns where the agent found nothing -
+        # training on "informasi tidak ditemukan" teaches it to refuse.
+        pending_user: str | None = None
+        for row in db.execute(
+            select(ChatHistory).order_by(ChatHistory.session_id, ChatHistory.id)
+        ).scalars():
+            if row.role == "user":
+                pending_user = row.message
+            elif row.role == "assistant" and pending_user:
+                if "tidak ditemukan" not in row.message.lower():
+                    yield json.dumps(
+                        {
+                            "messages": [
+                                {"role": "user", "content": pending_user},
+                                {"role": "assistant", "content": row.message},
+                            ],
+                            "source": "chat_history",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n"
+                pending_user = None
+
+    # Streamed: the whole chat history must not be built up in memory first.
+    return StreamingResponse(
+        lines(),
+        media_type="application/x-ndjson",
+        headers={"content-disposition": 'attachment; filename="knowledge-export.jsonl"'},
+    )
+
+
+@app.post("/knowledge", response_model=KnowledgeFactInfo, status_code=201)
+def knowledge_add(req: KnowledgeFactCreate, db: Session = Depends(get_db)):
+    """A human adds a fact directly - approved and searchable immediately."""
+    try:
+        return knowledge_service.add_verified(db, req.content)
+    except knowledge_service.InvalidFact as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            502, safe_detail("Gagal menyimpan fakta.", exc, "knowledge_add")
+        ) from exc
+
+
+@app.post("/knowledge/{fact_id}/approve", response_model=KnowledgeFactInfo)
+def knowledge_approve(fact_id: int, db: Session = Depends(get_db)):
+    try:
+        fact = knowledge_service.set_status(db, fact_id, "approved")
+    except Exception as exc:
+        raise HTTPException(
+            502, safe_detail("Gagal menyetujui fakta.", exc, "knowledge_approve")
+        ) from exc
+    if fact is None:
+        raise HTTPException(404, f"Fakta {fact_id} tidak ditemukan.")
+    return fact
+
+
+@app.post("/knowledge/{fact_id}/reject", response_model=KnowledgeFactInfo)
+def knowledge_reject(fact_id: int, db: Session = Depends(get_db)):
+    """Rejected rows are kept, not deleted: the audit trail is the point."""
+    fact = knowledge_service.set_status(db, fact_id, "rejected")
+    if fact is None:
+        raise HTTPException(404, f"Fakta {fact_id} tidak ditemukan.")
+    return fact
+
+
+@app.delete("/knowledge/{fact_id}")
+def knowledge_delete(fact_id: int, db: Session = Depends(get_db)):
+    if not knowledge_service.delete(db, fact_id):
+        raise HTTPException(404, f"Fakta {fact_id} tidak ditemukan.")
+    return {"id": fact_id, "deleted": True}
 
 
 @app.get("/sessions", response_model=list[SessionInfo])

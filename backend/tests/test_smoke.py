@@ -1,5 +1,6 @@
 """Runnable checks for the non-trivial logic: SQL guardrails and upload validation."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -147,3 +148,67 @@ def test_sources_survive_a_copied_context():
 
     contextvars.copy_context().run(inside_tool)
     assert [c["filename"] for c in rag_tool.get_sources()] == ["x.pdf"]
+
+
+# --- Knowledge base: the approval boundary ---
+
+
+def test_knowledge_facts_not_reachable_by_sql_tool():
+    """Pending proposals must not be readable through the SQL tool: they are
+    unverified text the agent itself wrote."""
+    with pytest.raises(UnsafeQuery):
+        validate("SELECT content FROM knowledge_facts")
+
+
+def test_search_query_filters_to_approved():
+    """The status filter is the whole security boundary of the read path, so
+    assert on the SQL text rather than trusting it stays there."""
+    import inspect
+
+    from services import knowledge_service
+
+    sql = inspect.getsource(knowledge_service.search)
+    assert "status = 'approved'" in sql
+    assert "embedding IS NOT NULL" in sql
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "pendek", "x" * 2001])
+def test_rejects_unusable_fact_text(bad):
+    from services.knowledge_service import InvalidFact, _validate
+
+    with pytest.raises(InvalidFact):
+        _validate(bad)
+
+
+def test_normalise_collapses_whitespace():
+    from services.knowledge_service import _validate
+
+    assert _validate("  kode   proyek\n\nSIAK  adalah SK-2024 ") == (
+        "kode proyek SIAK adalah SK-2024"
+    )
+
+
+def test_remember_fact_never_claims_the_fact_is_active():
+    """The tool's reply goes straight to the user. A proposal is not knowledge
+    yet, and the model must not be handed wording that says otherwise."""
+    import inspect
+
+    from tools import knowledge_tool
+
+    # @tool wraps the function; .func is the original.
+    source = inspect.getsource(knowledge_tool.remember_fact.func)
+    assert "menunggu verifikasi" in source
+    assert "belum dipakai" in source
+
+
+def test_fact_search_is_not_behind_an_approximate_index():
+    """An ivfflat index over a handful of rows returns nothing at all - an
+    approved fact was invisible until the index was dropped. Keep the exact
+    scan until a measured row count justifies an index plus ivfflat.probes."""
+    for path in ("sql/init.sql", "sql/migrations/002_knowledge_facts.sql"):
+        sql = (Path(__file__).resolve().parent.parent / path).read_text()
+        # Match the statement, not the word: the file explains in a comment
+        # why there is no such index.
+        assert not re.search(
+            r"CREATE INDEX[^;]*ON knowledge_facts[^;]*ivfflat", sql, re.IGNORECASE
+        ), f"{path} reintroduced an ivfflat index on knowledge_facts"
